@@ -20,7 +20,7 @@ jobs:
         run: python -m pip install pyinstaller
 
       - name: Crea InventoryIMS.exe
-        run: python -m PyInstaller --onefile --name InventoryIMS main.py
+        run: python -m PyInstaller --onefile --windowed --name InventoryIMS main.py
 
       - name: Prepara EXE da scaricare
         uses: actions/upload-artifact@v4
