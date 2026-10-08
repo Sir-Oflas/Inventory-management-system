@@ -26,3 +26,8 @@ settings.json
 
 # Logs
 *.log
+
+# SQLite sidecar files
+*.db-wal
+*.db-shm
+*.db-journal

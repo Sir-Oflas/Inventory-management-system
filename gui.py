@@ -4,22 +4,24 @@ Author: Sujal (BSc.IT)
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
-from typing import Optional
+from typing import Callable, Optional
 import csv
+import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 import json
 import tkinter.font as tkfont
 
-from db import Database
+from db import Database, _get_app_dir
 from services import InventoryService
+from warehouse_ui import ScrollPage, Choice, Table, saved, export_rows, WarehouseDialog, WarehousesTab, TransactionsTab, ReportsTab
 
 
 def format_currency(value: float, symbol: str) -> str:
     return f"{symbol}{value:,.2f}"
 
 
-SETTINGS_FILE = Path(__file__).with_name("settings.json")
+SETTINGS_FILE = _get_app_dir() / "settings.json"
 
 
 def load_settings() -> dict:
@@ -42,7 +44,7 @@ def enable_treeview_sort(tree: ttk.Treeview) -> None:
         def parse_val(v: str):
             try:
                 s = v.replace(",", "").strip()
-                if s and not s[0].isdigit() and s[0] in {"₹", "$", "€", "£"}:
+                if s and not s[0].isdigit() and s[0] in {"€", "$", "€", "£"}:
                     s = s[1:]
                 return float(s)
             except Exception:
@@ -57,16 +59,29 @@ def enable_treeview_sort(tree: ttk.Treeview) -> None:
         tree.heading(col, command=lambda c=col: sortby(c, False))
 
 
+def refresh_after_save(parent, refresh: Callable[[], None]) -> None:
+    """Report refresh failures without misreporting a committed operation."""
+    try:
+        refresh()
+    except Exception as e:
+        messagebox.showwarning(
+            "Refresh failed",
+            f"Changes saved, but the display could not be updated: {e}",
+            parent=parent,
+        )
+
+
 class ProductsTab(ttk.Frame):
-    def __init__(self, parent: ttk.Notebook, service: InventoryService, currency_symbol: str) -> None:
+    def __init__(self, parent: ttk.Notebook, service: InventoryService, currency_symbol: str, on_change: Optional[Callable[[], None]] = None) -> None:
         super().__init__(parent)
         self.service = service
+        self.on_change = on_change
         self.currency_symbol = currency_symbol
 
         self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self.search_var = tk.StringVar()
-
         search_frame = ttk.Frame(self)
         search_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
         ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT)
@@ -83,26 +98,26 @@ class ProductsTab(ttk.Frame):
         ttk.Button(buttons, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=6)
         ttk.Button(buttons, text="Refresh", command=self.refresh).pack(side=tk.LEFT)
 
-        columns = ("id", "name", "sku", "unit_price", "quantity_in_stock", "reorder_level")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=16)
+        columns = ("id", "name", "sku", "description")
+        table_frame = ttk.Frame(self)
+        table_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(6, 10))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
         self.tree.heading("id", text="ID")
         self.tree.heading("name", text="Name")
         self.tree.heading("sku", text="SKU")
-        self.tree.heading("unit_price", text="Unit Price")
-        self.tree.heading("quantity_in_stock", text="Stock")
-        self.tree.heading("reorder_level", text="Reorder")
+        self.tree.heading("description", text="Description")
         self.tree.column("id", width=50, anchor=tk.E)
         self.tree.column("name", width=260)
         self.tree.column("sku", width=140)
-        self.tree.column("unit_price", width=120, anchor=tk.E)
-        self.tree.column("quantity_in_stock", width=100, anchor=tk.E)
-        self.tree.column("reorder_level", width=100, anchor=tk.E)
+        self.tree.column("description", width=360)
 
         # Add vertical scrollbar
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.grid(row=2, column=0, sticky="nsew", padx=(10, 0), pady=(6, 10))
-        vsb.grid(row=2, column=1, sticky="ns", pady=(6, 10))
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
 
         # Apply sorting behavior
         enable_treeview_sort(self.tree)
@@ -122,12 +137,11 @@ class ProductsTab(ttk.Frame):
         for item in self.tree.get_children():
             self.tree.delete(item)
         q = (self.search_var.get() or "").lower()
-        products = self.service.list_products()
+        products = self.service.list_product_catalogue()
         if q:
             products = [p for p in products if q in (p['name'] or '').lower() or q in (p.get('sku') or '').lower()]
         for p in products:
-            price_str = format_currency(float(p['unit_price']), self.currency_symbol)
-            self.tree.insert("", tk.END, values=(p['id'], p['name'], p.get('sku') or '', price_str, p['quantity_in_stock'], p['reorder_level']))
+            self.tree.insert("", tk.END, values=(p['id'], p['name'], p.get('sku') or '', p.get('description') or ''))
 
     def _get_selected_id(self) -> Optional[int]:
         selected = self.tree.selection()
@@ -141,10 +155,11 @@ class ProductsTab(ttk.Frame):
 
     def _create_product(self, data: dict) -> None:
         try:
-            self.service.add_product(data['name'], data.get('sku'), data.get('description'), float(data['unit_price']), int(data['reorder_level']))
-            self.refresh()
+            self.service.add_product(data['name'], data.get('sku'), data.get('description'))
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
+            return
+        refresh_after_save(self, self.on_change or self.refresh)
 
     def edit_selected(self) -> None:
         product_id = self._get_selected_id()
@@ -163,13 +178,12 @@ class ProductsTab(ttk.Frame):
                 'name': data['name'],
                 'sku': data.get('sku'),
                 'description': data.get('description'),
-                'unit_price': float(data['unit_price']),
-                'reorder_level': int(data['reorder_level']),
             }
             self.service.update_product(product_id, **fields)
-            self.refresh()
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
+            return
+        refresh_after_save(self, self.on_change or self.refresh)
 
     def delete_selected(self) -> None:
         product_id = self._get_selected_id()
@@ -180,322 +194,153 @@ class ProductsTab(ttk.Frame):
             return
         try:
             self.service.delete_product(product_id)
-            self.refresh()
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
+            return
+        refresh_after_save(self, self.on_change or self.refresh)
 
     def export_csv(self) -> None:
-        products = self.service.list_products()
+        products = self.service.list_product_catalogue()
+        q = self.search_var.get().lower()
+        products = [p for p in products if not q or q in p['name'].lower() or q in (p.get('sku') or '').lower()]
         filepath = filedialog.asksaveasfilename(parent=self, title="Export Products CSV", defaultextension=".csv", filetypes=[("CSV Files", "*.csv")], initialfile=f"products_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv")
         if not filepath:
             return
         try:
             with open(filepath, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["id", "name", "sku", "description", "unit_price", "quantity_in_stock", "reorder_level"])
+                writer.writerow(["id", "name", "sku", "description"])
                 for p in products:
-                    writer.writerow([p['id'], p['name'], p.get('sku') or '', p.get('description') or '', p['unit_price'], p['quantity_in_stock'], p['reorder_level']])
+                    writer.writerow([p['id'], p['name'], p.get('sku') or '', p.get('description') or ''])
             messagebox.showinfo("Export", f"Exported to {filepath}", parent=self)
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
 
 
 class SuppliersTab(ttk.Frame):
-    def __init__(self, parent: ttk.Notebook, service: InventoryService) -> None:
+    def __init__(self, parent, service, on_change=None) -> None:
         super().__init__(parent)
         self.service = service
-
-        self.columnconfigure(0, weight=1)
-
-        buttons = ttk.Frame(self)
-        buttons.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        ttk.Button(buttons, text="Add", command=self.add_supplier).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="Edit", command=self.edit_selected).pack(side=tk.LEFT, padx=6)
-        ttk.Button(buttons, text="Delete", command=self.delete_selected).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="Refresh", command=self.refresh).pack(side=tk.LEFT, padx=6)
-
-        columns = ("id", "name", "contact_name", "phone", "email", "address")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=16)
-        for c, label, width, anchor in (
-            ("id", "ID", 50, tk.E),
-            ("name", "Name", 220, tk.W),
-            ("contact_name", "Contact", 150, tk.W),
-            ("phone", "Phone", 130, tk.W),
-            ("email", "Email", 220, tk.W),
-            ("address", "Address", 300, tk.W),
-        ):
-            self.tree.heading(c, text=label)
-            self.tree.column(c, width=width, anchor=anchor)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(6, 10))
-        vsb.grid(row=1, column=1, sticky="ns", pady=(6, 10))
-
-        enable_treeview_sort(self.tree)
-        style = ttk.Style(self)
-        style.configure("Treeview", rowheight=24)
-        self.tree.tag_configure("odd", background="#fbfbfb")
-
-        self.refresh()
-
-    def refresh(self) -> None:
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for s in self.service.list_suppliers():
-            self.tree.insert("", tk.END, values=(s['id'], s['name'], s.get('contact_name') or '', s.get('phone') or '', s.get('email') or '', s.get('address') or ''))
-
-    def _get_selected_id(self) -> Optional[int]:
-        selected = self.tree.selection()
-        if not selected:
-            return None
-        values = self.tree.item(selected[0], 'values')
-        return int(values[0])
-
-    def add_supplier(self) -> None:
-        SupplierDialog(self, title="Add Supplier", on_submit=self._create_supplier)
-
-    def _create_supplier(self, data: dict) -> None:
-        try:
-            self.service.add_supplier(data['name'], data.get('contact_name'), data.get('phone'), data.get('email'), data.get('address'))
-            self.refresh()
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
-
-    def edit_selected(self) -> None:
-        sid = self._get_selected_id()
-        if sid is None:
-            messagebox.showinfo("Select", "Please select a supplier to edit.", parent=self)
-            return
-        supplier = self.service.get_supplier(sid)
-        if supplier is None:
-            messagebox.showerror("Error", "Supplier not found.", parent=self)
-            return
-        SupplierDialog(self, title="Edit Supplier", initial=supplier, on_submit=lambda d: self._update_supplier(sid, d))
-
-    def _update_supplier(self, sid: int, data: dict) -> None:
-        try:
-            self.service.update_supplier(
-                sid,
-                name=data['name'],
-                contact_name=data.get('contact_name'),
-                phone=data.get('phone'),
-                email=data.get('email'),
-                address=data.get('address'),
-            )
-            self.refresh()
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
-
-    def delete_selected(self) -> None:
-        sid = self._get_selected_id()
-        if sid is None:
-            messagebox.showinfo("Select", "Please select a supplier to delete.", parent=self)
-            return
-        if not messagebox.askyesno("Confirm", "Delete selected supplier?", parent=self):
-            return
-        try:
-            self.service.delete_supplier(sid)
-            self.refresh()
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
-
-
-class TransactionsTab(ttk.Frame):
-    def __init__(self, parent: ttk.Notebook, service: InventoryService, currency_symbol: str) -> None:
-        super().__init__(parent)
-        self.service = service
-        self.currency_symbol = currency_symbol
-
-        container = ttk.Notebook(self)
-        container.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-        self.purchase_frame = ttk.Frame(container)
-        self.sale_frame = ttk.Frame(container)
-        container.add(self.purchase_frame, text="Record Purchase")
-        container.add(self.sale_frame, text="Record Sale")
-
-        # Purchase UI
-        self.product_var_p = tk.StringVar()
-        self.supplier_var = tk.StringVar()
-        self.qty_var_p = tk.StringVar()
-        self.cost_var = tk.StringVar()
-
-        self._build_purchase_ui()
-
-        # Sale UI
-        self.product_var_s = tk.StringVar()
-        self.qty_var_s = tk.StringVar()
-        self.price_var = tk.StringVar()
-        self.customer_var = tk.StringVar()
-        self.notes_var = tk.StringVar()
-
-        self._build_sale_ui()
-
-    def _get_products_list(self) -> list[tuple[int, str]]:
-        return [(p['id'], f"{p['name']} (SKU: {p.get('sku') or '-'})") for p in self.service.list_products()]
-
-    def _get_suppliers_list(self) -> list[tuple[int, str]]:
-        return [(s['id'], s['name']) for s in self.service.list_suppliers()]
-
-    def _build_purchase_ui(self) -> None:
-        frm = self.purchase_frame
-        ttk.Label(frm, text="Product:").grid(row=0, column=0, sticky=tk.W, padx=8, pady=6)
-        self.products_cb_p = ttk.Combobox(frm, textvariable=self.product_var_p, state="readonly", width=40)
-        self.products_cb_p.grid(row=0, column=1, padx=8, pady=6)
-        ttk.Label(frm, text="Supplier:").grid(row=1, column=0, sticky=tk.W, padx=8, pady=6)
-        self.suppliers_cb = ttk.Combobox(frm, textvariable=self.supplier_var, state="readonly", width=40)
-        self.suppliers_cb.grid(row=1, column=1, padx=8, pady=6)
-        ttk.Label(frm, text="Quantity:").grid(row=2, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(frm, textvariable=self.qty_var_p).grid(row=2, column=1, padx=8, pady=6)
-        ttk.Label(frm, text=f"Unit Cost ({self.currency_symbol}):").grid(row=3, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(frm, textvariable=self.cost_var).grid(row=3, column=1, padx=8, pady=6)
-        ttk.Button(frm, text="Record Purchase", command=self.record_purchase).grid(row=4, column=0, columnspan=2, padx=8, pady=(10, 8))
-
-        frm.grid_columnconfigure(1, weight=1)
-        self._refresh_purchase_choices()
-
-    def _refresh_purchase_choices(self) -> None:
-        prods = self._get_products_list()
-        sups = self._get_suppliers_list()
-        self.products_cb_p['values'] = [f"{pid}: {label}" for pid, label in prods]
-        self.suppliers_cb['values'] = [f"{sid}: {label}" for sid, label in sups]
-        if prods:
-            self.products_cb_p.current(0)
-        if sups:
-            self.suppliers_cb.current(0)
-
-    def record_purchase(self) -> None:
-        try:
-            pid = int((self.product_var_p.get().split(":", 1)[0]))
-            sid_str = self.supplier_var.get()
-            sid = int((sid_str.split(":", 1)[0])) if sid_str else None
-            qty = int(self.qty_var_p.get())
-            cost = float(self.cost_var.get())
-            self.service.record_purchase(pid, qty, cost, sid)
-            messagebox.showinfo("Success", "Purchase recorded.", parent=self)
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
-
-    def _build_sale_ui(self) -> None:
-        frm = self.sale_frame
-        ttk.Label(frm, text="Product:").grid(row=0, column=0, sticky=tk.W, padx=8, pady=6)
-        self.products_cb_s = ttk.Combobox(frm, textvariable=self.product_var_s, state="readonly", width=40)
-        self.products_cb_s.grid(row=0, column=1, padx=8, pady=6)
-        ttk.Label(frm, text="Quantity:").grid(row=1, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(frm, textvariable=self.qty_var_s).grid(row=1, column=1, padx=8, pady=6)
-        ttk.Label(frm, text=f"Unit Price ({self.currency_symbol}):").grid(row=2, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(frm, textvariable=self.price_var).grid(row=2, column=1, padx=8, pady=6)
-        ttk.Label(frm, text="Customer (optional):").grid(row=3, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(frm, textvariable=self.customer_var).grid(row=3, column=1, padx=8, pady=6)
-        ttk.Label(frm, text="Notes (optional):").grid(row=4, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(frm, textvariable=self.notes_var).grid(row=4, column=1, padx=8, pady=6)
-        ttk.Button(frm, text="Record Sale", command=self.record_sale).grid(row=5, column=0, columnspan=2, padx=8, pady=(10, 8))
-
-        frm.grid_columnconfigure(1, weight=1)
-        self._refresh_sale_choices()
-
-    def _refresh_sale_choices(self) -> None:
-        prods = self._get_products_list()
-        self.products_cb_s['values'] = [f"{pid}: {label}" for pid, label in prods]
-        if prods:
-            self.products_cb_s.current(0)
-
-    def record_sale(self) -> None:
-        try:
-            pid = int((self.product_var_s.get().split(":", 1)[0]))
-            qty = int(self.qty_var_s.get())
-            price = float(self.price_var.get())
-            customer = self.customer_var.get().strip() or None
-            notes = self.notes_var.get().strip() or None
-            self.service.record_sale(pid, qty, price, customer, notes)
-            messagebox.showinfo("Success", "Sale recorded.", parent=self)
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
-
-
-class ReportsTab(ttk.Frame):
-    def __init__(self, parent: ttk.Notebook, service: InventoryService, currency_symbol: str) -> None:
-        super().__init__(parent)
-        self.service = service
-        self.currency_symbol = currency_symbol
-
-        self.view_var = tk.StringVar(value="Stock Levels")
+        self.on_change = on_change or self.refresh
         top = ttk.Frame(self)
-        top.pack(fill=tk.X, padx=8, pady=6)
-        ttk.Label(top, text="Report:").pack(side=tk.LEFT)
-        self.view_cb = ttk.Combobox(top, textvariable=self.view_var, state="readonly", values=["Stock Levels", "Low Stock", "Sales Summary"], width=20)
-        self.view_cb.pack(side=tk.LEFT, padx=6)
-        ttk.Button(top, text="Run", command=self.refresh).pack(side=tk.LEFT)
-        ttk.Button(top, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=6)
-
-        # Keep stable column identifiers and just change headings/widths
-        self.tree = ttk.Treeview(self, columns=("col1", "col2", "col3"), show="headings", height=16)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        top.pack(fill='x', padx=10, pady=8)
+        ttk.Label(top, text='Supplier: ').pack(side=tk.LEFT)
+        self.supplier = Choice(top, self.refresh_catalogue)
+        self.supplier.pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text='Refresh', command=self.refresh).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text='Export CSV', command=self.export_csv).pack(side=tk.LEFT, padx=4)
+        self.tree = Table(self, ('id', 'name', 'sku', 'description', 'purchase_price'))
+        associations = ttk.LabelFrame(self, text='Product catalogue')
+        associations.pack(fill='x', padx=10, pady=4)
+        ttk.Label(associations, text='Product: ').pack(side=tk.LEFT, padx=4, pady=8)
+        self.existing_product = Choice(associations)
+        self.existing_product.pack(side=tk.LEFT, padx=4, pady=8)
+        ttk.Button(associations, text='Associate existing', command=self.associate).pack(side=tk.LEFT, padx=4, pady=8)
+        ttk.Button(associations, text='Remove association', command=self.unlink).pack(side=tk.LEFT, padx=4, pady=8)
+        ttk.Button(associations, text='Set price', command=self.set_price).pack(side=tk.LEFT, padx=4, pady=8)
+        self.tree.pack(fill='both', expand=True, padx=10, pady=8)
         self.refresh()
 
-    def refresh(self) -> None:
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        view = self.view_var.get()
-        if view == "Stock Levels":
-            labels = ("Product", "Stock", "Reorder")
-            for i, h in enumerate(labels):
-                self.tree.heading(f"col{i+1}", text=h)
-                self.tree.column(f"col{i+1}", width=(250 if i == 0 else 100), anchor=(tk.W if i == 0 else tk.E))
-            for p in self.service.report_stock_levels():
-                self.tree.insert("", tk.END, values=(p['name'], p['quantity_in_stock'], p['reorder_level']))
-        elif view == "Low Stock":
-            labels = ("Product", "Stock", "Reorder")
-            for i, h in enumerate(labels):
-                self.tree.heading(f"col{i+1}", text=h)
-                self.tree.column(f"col{i+1}", width=(250 if i == 0 else 100), anchor=(tk.W if i == 0 else tk.E))
-            for p in self.service.report_low_stock():
-                self.tree.insert("", tk.END, values=(p['name'], p['quantity_in_stock'], p['reorder_level']))
-        else:
-            labels = ("Product", "Qty Sold", "Revenue")
-            for i, h in enumerate(labels):
-                self.tree.heading(f"col{i+1}", text=h)
-                self.tree.column(f"col{i+1}", width=(250 if i == 0 else 120), anchor=(tk.W if i == 0 else tk.E))
-            for r in self.service.report_sales_summary():
-                revenue = format_currency(float(r['total_revenue'] or 0), self.currency_symbol)
-                self.tree.insert("", tk.END, values=(r['product_name'], int(r['total_quantity_sold'] or 0), revenue))
+    def refresh(self):
+        self.supplier.reload(self.service.list_suppliers())
+        self.existing_product.reload(self.service.list_product_catalogue())
+        self.refresh_catalogue()
 
-    def export_csv(self) -> None:
-        view = self.view_var.get()
-        default_name = {
-            "Stock Levels": "stock_levels.csv",
-            "Low Stock": "low_stock.csv",
-            "Sales Summary": "sales_summary.csv",
-        }[view]
-        filepath = filedialog.asksaveasfilename(parent=self, title="Export CSV", defaultextension=".csv", filetypes=[("CSV Files", "*.csv")], initialfile=default_name)
-        if not filepath:
-            return
-        try:
-            with open(filepath, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if view == "Stock Levels":
-                    writer.writerow(["product", "stock", "reorder"])
-                    for p in self.service.report_stock_levels():
-                        writer.writerow([p['name'], p['quantity_in_stock'], p['reorder_level']])
-                elif view == "Low Stock":
-                    writer.writerow(["product", "stock", "reorder"])
-                    for p in self.service.report_low_stock():
-                        writer.writerow([p['name'], p['quantity_in_stock'], p['reorder_level']])
-                else:
-                    writer.writerow(["product", "qty_sold", "revenue"])
-                    for r in self.service.report_sales_summary():
-                        writer.writerow([r['product_name'], int(r['total_quantity_sold'] or 0), float(r['total_revenue'] or 0)])
-            messagebox.showinfo("Export", f"Exported to {filepath}", parent=self)
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
+    def refresh_catalogue(self):
+        supplier_id = self.supplier.identifier()
+        rows = self.service.list_supplier_products(supplier_id) if supplier_id is not None else []
+        self.tree.reload(rows)
+
+    def _get_selected_id(self):
+        return self.supplier.identifier()
+
+    def require_supplier(self):
+        supplier_id = self.supplier.identifier()
+        if supplier_id is None:
+            messagebox.showinfo('Select', 'Select a supplier first.', parent=self)
+        return supplier_id
+
+    def ask_price(self, initial=0):
+        return simpledialog.askfloat('Supplier price', 'Purchase price for this supplier:', initialvalue=initial, minvalue=0, parent=self)
+
+    def associate(self):
+        supplier_id, product_id = self.require_supplier(), self.existing_product.identifier()
+        if supplier_id is not None and product_id is not None:
+            price = self.ask_price()
+            if price is not None:
+                saved(self, lambda: self.service.associate_supplier_product(supplier_id, product_id, price), self.on_change)
+
+    def unlink(self):
+        supplier_id, product_id = self.require_supplier(), self.tree.identifier()
+        if supplier_id is not None and product_id is not None:
+            saved(self, lambda: self.service.remove_supplier_product(supplier_id, product_id), self.on_change)
+
+    def set_price(self):
+        supplier_id, product_id = self.require_supplier(), self.tree.identifier()
+        if supplier_id is not None and product_id is not None:
+            initial = float(self.tree.item(str(product_id), 'values')[-1])
+            price = self.ask_price(initial)
+            if price is not None:
+                saved(self, lambda: self.service.set_supplier_price(supplier_id, product_id, price), self.on_change)
+
+    def export_csv(self):
+        supplier_id = self.supplier.identifier()
+        rows = self.service.list_supplier_products(supplier_id) if supplier_id is not None else []
+        export_rows(self, [dict(row, supplier=self.supplier.get()) for row in rows], ('supplier', 'id', 'name', 'sku', 'description', 'purchase_price'), 'supplier_products.csv')
+
+class EntitySettings(ttk.LabelFrame):
+    def __init__(self, parent, service, kind, on_change):
+        super().__init__(parent, text=kind.title())
+        self.service, self.kind, self.on_change = service, kind, on_change
+        bar = ttk.Frame(self)
+        bar.pack(fill='x', padx=8, pady=6)
+        for label, command in [('Add', self.add), ('Edit', self.edit), ('Delete', self.delete)]:
+            ttk.Button(bar, text=label, command=command).pack(side=tk.LEFT, padx=4)
+        columns = ('id', 'name', 'address') if kind == 'warehouse' else ('id', 'name', 'contact_name', 'phone', 'email', 'address')
+        self.tree = Table(self, columns, height=4)
+        self.tree.pack(fill='both', expand=True, padx=8, pady=6)
+        self.refresh()
+
+    def refresh(self):
+        self.tree.reload(getattr(self.service, 'list_'+self.kind+'s')())
+
+    def changed(self):
+        self.refresh()
+        self.on_change()
+
+    def add(self):
+        self.open_dialog()
+
+    def edit(self):
+        identifier = self.tree.identifier()
+        if identifier is not None:
+            self.open_dialog(identifier)
+
+    def open_dialog(self, identifier=None):
+        initial = getattr(self.service, 'get_'+self.kind)(identifier) if identifier is not None else None
+        def submit(data):
+            if identifier is None:
+                action = lambda: getattr(self.service, 'add_'+self.kind)(**data)
+            else:
+                action = lambda: getattr(self.service, 'update_'+self.kind)(identifier, **data)
+            return saved(self, action, self.changed)
+        if self.kind == 'supplier':
+            SupplierDialog(self, 'Supplier', submit, initial)
+        else:
+            WarehouseDialog(self, lambda name, address: submit({'name': name, 'address': address}), initial)
+
+    def delete(self):
+        identifier = self.tree.identifier()
+        if identifier is not None and messagebox.askyesno('Confirm', f'Delete selected {self.kind}? Existing stock or movement history may prevent deletion.', parent=self):
+            saved(self, lambda: getattr(self.service, 'delete_'+self.kind)(identifier), self.changed)
 
 
 class SettingsTab(ttk.Frame):
-    def __init__(self, parent: ttk.Notebook, on_currency_change) -> None:
+    def __init__(self, parent, on_currency_change, service, on_suppliers_change, on_warehouses_change) -> None:
         super().__init__(parent)
         self.on_currency_change = on_currency_change
         settings = load_settings()
-        self.currency_var = tk.StringVar(value=settings.get("currency", "₹"))
+        self.currency_var = tk.StringVar(value=settings.get("currency", "€"))
 
         ttk.Label(self, text="Currency symbol:").grid(row=0, column=0, sticky=tk.W, padx=10, pady=(12, 6))
         ttk.Entry(self, textvariable=self.currency_var, width=10).grid(row=0, column=1, padx=8, pady=(12, 6))
@@ -506,8 +351,19 @@ class SettingsTab(ttk.Frame):
 
         self.grid_columnconfigure(3, weight=1)
 
+        self.supplier_settings = EntitySettings(self, service, 'supplier', on_suppliers_change)
+        self.supplier_settings.grid(row=2, column=0, columnspan=4, sticky='nsew', padx=10, pady=8)
+        self.warehouse_settings = EntitySettings(self, service, 'warehouse', on_warehouses_change)
+        self.warehouse_settings.grid(row=3, column=0, columnspan=4, sticky='nsew', padx=10, pady=8)
+        self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=1)
+
+    def refresh(self):
+        self.supplier_settings.refresh()
+        self.warehouse_settings.refresh()
+
     def save(self) -> None:
-        symbol = self.currency_var.get().strip() or "₹"
+        symbol = self.currency_var.get().strip() or "€"
         settings = load_settings()
         settings["currency"] = symbol
         save_settings(settings)
@@ -515,7 +371,7 @@ class SettingsTab(ttk.Frame):
         messagebox.showinfo("Saved", "Settings updated.", parent=self)
 
     def backup_db(self) -> None:
-        db_file = Path(__file__).with_name("inventory.db")
+        db_file = Path(self.service.db.db_path)
         if not db_file.exists():
             messagebox.showerror("Error", "Database not found.", parent=self)
             return
@@ -525,15 +381,17 @@ class SettingsTab(ttk.Frame):
         if not filepath:
             return
         try:
-            data = db_file.read_bytes()
-            Path(filepath).write_bytes(data)
+            if Path(filepath).resolve() == db_file.resolve():
+                raise ValueError("Choose a different file for the backup.")
+            with sqlite3.connect(db_file) as source, sqlite3.connect(filepath) as target:
+                source.backup(target)
             messagebox.showinfo("Backup", f"Backup saved: {filepath}", parent=self)
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
 
 
 class ProductDialog(tk.Toplevel):
-    def __init__(self, parent: ProductsTab, title: str, on_submit, initial: Optional[dict] = None) -> None:
+    def __init__(self, parent: ProductsTab, title: str, on_submit, initial: Optional[dict] = None, supplier_price: bool = False) -> None:
         super().__init__(parent)
         self.title(title)
         self.transient(parent)
@@ -544,8 +402,8 @@ class ProductDialog(tk.Toplevel):
         self.name_var = tk.StringVar(value=(initial or {}).get('name') or '')
         self.sku_var = tk.StringVar(value=(initial or {}).get('sku') or '')
         self.desc_var = tk.StringVar(value=(initial or {}).get('description') or '')
-        self.price_var = tk.StringVar(value=str((initial or {}).get('unit_price') or ''))
-        self.reorder_var = tk.StringVar(value=str((initial or {}).get('reorder_level') or '0'))
+        self.supplier_price = supplier_price
+        self.price_var = tk.StringVar(value='0')
 
         body = ttk.Frame(self)
         body.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
@@ -555,10 +413,9 @@ class ProductDialog(tk.Toplevel):
         ttk.Entry(body, textvariable=self.sku_var, width=40).grid(row=1, column=1, pady=4)
         ttk.Label(body, text="Description:").grid(row=2, column=0, sticky=tk.W, pady=4)
         ttk.Entry(body, textvariable=self.desc_var, width=40).grid(row=2, column=1, pady=4)
-        ttk.Label(body, text="Unit price:").grid(row=3, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(body, textvariable=self.price_var, width=20).grid(row=3, column=1, sticky=tk.W, pady=4)
-        ttk.Label(body, text="Reorder level:").grid(row=4, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(body, textvariable=self.reorder_var, width=20).grid(row=4, column=1, sticky=tk.W, pady=4)
+        if supplier_price:
+            ttk.Label(body, text="Supplier purchase price:").grid(row=3, column=0, sticky=tk.W, pady=4)
+            ttk.Entry(body, textvariable=self.price_var, width=20).grid(row=3, column=1, sticky=tk.W, pady=4)
 
         actions = ttk.Frame(self)
         actions.pack(fill=tk.X, padx=12, pady=(0, 12))
@@ -573,14 +430,18 @@ class ProductDialog(tk.Toplevel):
             'name': self.name_var.get().strip(),
             'sku': self.sku_var.get().strip() or None,
             'description': self.desc_var.get().strip() or None,
-            'unit_price': self.price_var.get().strip() or '0',
-            'reorder_level': self.reorder_var.get().strip() or '0',
         }
         if not data['name']:
             messagebox.showerror("Error", "Name is required.", parent=self)
             return
-        self.on_submit(data)
-        self.destroy()
+        if self.supplier_price:
+            try:
+                data['purchase_price'] = float(self.price_var.get())
+            except ValueError:
+                messagebox.showerror('Error', 'Enter a valid purchase price.', parent=self)
+                return
+        if self.on_submit(data) is not False:
+            self.destroy()
 
 
 class SupplierDialog(tk.Toplevel):
@@ -630,15 +491,15 @@ class SupplierDialog(tk.Toplevel):
         if not data['name']:
             messagebox.showerror("Error", "Name is required.", parent=self)
             return
-        self.on_submit(data)
-        self.destroy()
+        if self.on_submit(data) is not False:
+            self.destroy()
 
 
 class MainWindow(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Inventory Management System")
-        self.geometry("900x600")
+        self.geometry("1400x900")
 
         # Init core services
         self.database = Database()
@@ -646,7 +507,7 @@ class MainWindow(tk.Tk):
         self.service = InventoryService(self.database)
 
         # Simple runtime settings (currency)
-        self.currency_symbol = "₹"
+        self.currency_symbol = "€"
 
         # Apply professional styling
         self._apply_style()
@@ -659,22 +520,32 @@ class MainWindow(tk.Tk):
         notebook.pack(fill=tk.BOTH, expand=True)
         self.notebook = notebook
 
-        self.products_tab = ProductsTab(notebook, self.service, self.currency_symbol)
-        self.suppliers_tab = SuppliersTab(notebook, self.service)
-        self.transactions_tab = TransactionsTab(notebook, self.service, self.currency_symbol)
-        self.reports_tab = ReportsTab(notebook, self.service, self.currency_symbol)
-        self.settings_tab = SettingsTab(notebook, self._on_currency_change)
-
-        notebook.add(self.products_tab, text="Products")
-        notebook.add(self.suppliers_tab, text="Suppliers")
-        notebook.add(self.transactions_tab, text="Transactions")
-        notebook.add(self.reports_tab, text="Reports")
-        notebook.add(self.settings_tab, text="Settings")
-
-        # Status bar
+        # Reserve the status bar before the notebook consumes available space.
+        notebook.pack_forget()
         self.status_var = tk.StringVar(value="Ready")
         status = ttk.Label(self, textvariable=self.status_var, anchor="w", relief="sunken")
         status.pack(side=tk.BOTTOM, fill=tk.X)
+        notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.tab_pages = {}
+        def add_tab(attribute, label, factory):
+            page = ScrollPage(notebook)
+            tab = factory(page.content)
+            tab.pack(fill=tk.BOTH, expand=True)
+            setattr(self, attribute, tab)
+            if hasattr(tab, 'refresh'):
+                page.refresh = tab.refresh
+            self.tab_pages[attribute] = page
+            notebook.add(page, text=label)
+
+        add_tab('warehouses_tab', 'Warehouses', lambda parent: WarehousesTab(parent, self.service, self._on_warehouses_changed))
+        add_tab('products_tab', 'Products', lambda parent: ProductsTab(parent, self.service, self.currency_symbol, self._on_products_changed))
+        add_tab('suppliers_tab', 'Suppliers', lambda parent: SuppliersTab(parent, self.service, self._on_suppliers_changed))
+        add_tab('transactions_tab', 'Transactions', lambda parent: TransactionsTab(parent, self.service, self.currency_symbol, self._on_transaction_recorded))
+        add_tab('reports_tab', 'Reports', lambda parent: ReportsTab(parent, self.service, self.currency_symbol))
+        add_tab('settings_tab', 'Settings', lambda parent: SettingsTab(parent, self._on_currency_change, self.service, self._on_suppliers_changed, self._on_warehouses_changed))
+
+        notebook.select(self.tab_pages['warehouses_tab'])
 
         # Center window
         self.after(50, self._center_on_screen)
@@ -736,6 +607,23 @@ class MainWindow(tk.Tk):
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
 
+    def _refresh_tabs_after_save(self, *tabs) -> None:
+        # A failure in one view must not prevent the others from updating.
+        for tab in tabs:
+            refresh_after_save(self, tab.refresh)
+
+    def _on_products_changed(self) -> None:
+        self._refresh_tabs_after_save(self.products_tab, self.suppliers_tab, self.warehouses_tab, self.transactions_tab, self.reports_tab)
+
+    def _on_suppliers_changed(self) -> None:
+        self._refresh_tabs_after_save(self.suppliers_tab, self.products_tab, self.warehouses_tab, self.transactions_tab, self.reports_tab)
+
+    def _on_warehouses_changed(self) -> None:
+        self._refresh_tabs_after_save(self.warehouses_tab, self.products_tab, self.transactions_tab, self.reports_tab)
+
+    def _on_transaction_recorded(self) -> None:
+        self._refresh_tabs_after_save(self.products_tab, self.suppliers_tab, self.warehouses_tab, self.transactions_tab, self.reports_tab)
+
     def refresh_current_tab(self) -> None:
         tab = self.notebook.nametowidget(self.notebook.select())
         if hasattr(tab, "refresh"):
@@ -747,12 +635,18 @@ class MainWindow(tk.Tk):
 
     def _center_on_screen(self) -> None:
         self.update_idletasks()
-        w = self.winfo_width()
-        h = self.winfo_height()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
+        # Leave room for the title bar, desktop panels and taskbar.
+        available_width = max(1, sw - 80)
+        available_height = max(1, sh - 120)
+        required_width = self.winfo_reqwidth()
+        required_height = self.winfo_reqheight()
+        w = min(max(1400, required_width), available_width)
+        h = min(max(900, required_height), available_height)
+        self.minsize(min(480, available_width), min(320, available_height))
         x = max(0, (sw - w) // 2)
-        y = max(0, (sh - h) // 3)
+        y = max(30, (sh - h) // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _on_exit(self) -> None:

@@ -1,126 +1,114 @@
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
 
 
-def _get_app_dir() -> Path:
-    if getattr(sys, "frozen", False):  # PyInstaller onefile
-        return Path(sys.executable).parent
-    return Path(__file__).parent
-
-
-class Database:
-    """Database helper class for SQLite operations"""
-    
-    def __init__(self, db_path=None):
-        # Default to inventory.db in app directory
-        if db_path is None:
-            self.db_path = str(_get_app_dir() / "inventory.db")
-        else:
-            self.db_path = db_path
-
-    def _connect(self):
-        """Create database connection with row factory"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def init_db(self):
-        """Initialize database tables if they don't exist"""
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            
-            # Enable foreign keys
-            cursor.execute("PRAGMA foreign_keys = ON;")
-            
-            # Products table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS products (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    sku TEXT UNIQUE,
-                    description TEXT,
-                    unit_price REAL NOT NULL DEFAULT 0,
-                    quantity_in_stock INTEGER NOT NULL DEFAULT 0,
-                    reorder_level INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-            """)
-            
-            # Suppliers table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS suppliers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    contact_name TEXT,
-                    phone TEXT,
-                    email TEXT,
-                    address TEXT,
-                    created_at TEXT NOT NULL
-                );
-            """)
-            
-            # Purchases table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS purchases (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    product_id INTEGER NOT NULL,
-                    supplier_id INTEGER,
-                    quantity INTEGER NOT NULL,
-                    unit_cost REAL NOT NULL,
-                    purchased_at TEXT NOT NULL,
-                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT,
-                    FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE SET NULL
-                );
-            """)
-            
-            # Sales table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS sales (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    product_id INTEGER NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    unit_price REAL NOT NULL,
-                    sold_at TEXT NOT NULL,
-                    customer_name TEXT,
-                    notes TEXT,
-                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT
-                );
-            """)
-            
-            # Create indexes for better performance
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_purchases_product_id ON purchases(product_id);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sales_product_id ON sales(product_id);")
-            
-            conn.commit()
-
-    def execute(self, sql, params=()):
-        """Execute SQL and return last row id"""
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            conn.commit()
-            return cursor.lastrowid
-
-    def query_all(self, sql, params=()):
-        """Query and return all rows as list of dicts"""
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    def query_one(self, sql, params=()):
-        """Query and return single row as dict, or None"""
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            row = cursor.fetchone()
-            return dict(row) if row else None
+def _get_app_dir():
+    return Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 
 
 def utc_now_iso():
-    """Get current UTC time as ISO string"""
-    return datetime.now(timezone.utc).isoformat() 
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Database:
+    def __init__(self, db_path=None):
+        self.db_path = str(db_path if db_path is not None else _get_app_dir() / 'inventory.db')
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON')
+        return conn
+
+    @contextmanager
+    def transaction(self):
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def init_db(self):
+        conn = self._connect()
+        try:
+            conn.executescript('''
+                CREATE TABLE IF NOT EXISTS products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+                    sku TEXT UNIQUE, description TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS suppliers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+                    contact_name TEXT, phone TEXT, email TEXT, address TEXT, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS warehouses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT COLLATE NOCASE NOT NULL UNIQUE,
+                    address TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS warehouse_stock (
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+                    quantity INTEGER NOT NULL DEFAULT 0 CHECK(typeof(quantity) = 'integer' AND quantity >= 0),
+                    reorder_level INTEGER NOT NULL DEFAULT 0 CHECK(typeof(reorder_level) = 'integer' AND reorder_level >= 0),
+                    PRIMARY KEY(product_id, warehouse_id));
+                CREATE TABLE IF NOT EXISTS supplier_products (
+                    supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                    purchase_price REAL NOT NULL DEFAULT 0 CHECK(purchase_price >= 0),
+                    PRIMARY KEY(supplier_id, product_id));
+                CREATE TABLE IF NOT EXISTS purchases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+                    supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+                    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+                    quantity INTEGER NOT NULL CHECK(typeof(quantity) = 'integer' AND quantity > 0),
+                    unit_cost REAL NOT NULL CHECK(unit_cost >= 0), purchased_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS sales (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+                    warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+                    quantity INTEGER NOT NULL CHECK(typeof(quantity) = 'integer' AND quantity > 0),
+                    unit_price REAL NOT NULL CHECK(unit_price >= 0), sold_at TEXT NOT NULL,
+                    customer_name TEXT, notes TEXT);
+                CREATE TABLE IF NOT EXISTS transfers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+                    source_warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+                    destination_warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+                    quantity INTEGER NOT NULL CHECK(typeof(quantity) = 'integer' AND quantity > 0),
+                    transferred_at TEXT NOT NULL, notes TEXT,
+                    CHECK(source_warehouse_id != destination_warehouse_id));
+                CREATE INDEX IF NOT EXISTS stock_warehouse ON warehouse_stock(warehouse_id);
+                CREATE INDEX IF NOT EXISTS catalog_product ON supplier_products(product_id);
+                CREATE INDEX IF NOT EXISTS purchases_product ON purchases(product_id);
+                CREATE INDEX IF NOT EXISTS sales_product ON sales(product_id);
+                CREATE INDEX IF NOT EXISTS transfers_product ON transfers(product_id);
+                CREATE TRIGGER IF NOT EXISTS protect_product_stock BEFORE DELETE ON products
+                    WHEN EXISTS(SELECT 1 FROM warehouse_stock WHERE product_id=OLD.id AND quantity>0)
+                    BEGIN SELECT RAISE(ABORT, 'Product has positive stock'); END;
+                CREATE TRIGGER IF NOT EXISTS protect_warehouse_stock BEFORE DELETE ON warehouses
+                    WHEN EXISTS(SELECT 1 FROM warehouse_stock WHERE warehouse_id=OLD.id AND quantity>0)
+                    BEGIN SELECT RAISE(ABORT, 'Warehouse has positive stock'); END;
+            ''')
+        finally:
+            conn.close()
+
+    def execute(self, sql, params=()):
+        with self.transaction() as conn:
+            return conn.execute(sql, params).lastrowid
+
+    def query_all(self, sql, params=()):
+        conn = self._connect()
+        try:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+
+    def query_one(self, sql, params=()):
+        rows = self.query_all(sql, params)
+        return rows[0] if rows else None

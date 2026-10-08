@@ -1,29 +1,54 @@
-# Inventory Management System (Console + SQLite)
+# Inventory Management System (GUI + SQLite)
 
 # Author : Sujal Mandal
 
-A console-based Inventory Management System to track product stock, sales, purchases, and supplier data.
+A Tkinter inventory application tracking warehouse stock, sales, purchases, transfers and supplier catalogues.
 
 - Developed in Python
 - Uses SQLite for local database storage (file `inventory.db`)
 - Built as a personal project during BSc.IT studies by Sujal
 
 ## Features
-- Product management: add, list, update, delete, set reorder level
-- Supplier management: add, list, update, delete
-- Purchasing: record purchases, automatically increases stock
-- Sales: record sales, validates stock, automatically decreases stock
-- Reports:
-  - Current stock levels
-  - Low stock items (below reorder level)
-  - Sales summary and product performance
-  - Sales and purchases between dates
-- Usability & Professional touches:
-  - Search/filter products
-  - CSV export of products and reports (saved in `exports/`)
-  - Delete confirmations
-  - Currency symbol setting (saved in `settings.json`)
-  - One-click database backup (saved in `backups/`)
+- Shared product and supplier catalogue; a product can belong to multiple suppliers.
+- Independent warehouses with local stock, reorder thresholds and low-stock reports.
+- Purchases filtered by supplier catalogue and credited to a destination warehouse.
+- Sales filtered by positive stock in the selected source warehouse.
+- Immediate transfers with confirmation, searchable history and CSV export.
+- Purchases and transfers add to destination stock and preserve existing local thresholds.
+- Atomic movements, positive integer quantities and protection against negative stock.
+- Products contains only the shared product identity (name, SKU, description).
+- Suppliers shows a selected supplier catalogue with purchase prices and product/supplier CRUD.
+- Warehouses shows local stock entries; Reports and exports support warehouse filters.
+- Automatic refresh of related tabs, currency settings and database backup.
+
+## Multi-warehouse setup
+This test version uses a new database schema and includes no migration. Before the
+first launch of this version, manually remove the old `inventory.db`. The app does
+not delete it automatically. CLI support is not updated; use the GUI.
+
+1. Create products in **Products** and suppliers in **Settings**.
+2. Select a supplier in **Suppliers**, associate existing products or create new ones, and set their supplier purchase prices.
+3. Manage supplier and warehouse identities in **Settings**; no default warehouse is created. **Warehouses** is the initial operational view.
+4. Choose a warehouse from the dropdown, select a product in its stock grid and click **Set reorder level**. The warehouse grid shows only existing stock/configuration entries, including exhausted products.
+5. In **Transactions**, choose supplier, catalogue product and destination for a
+   purchase; choose source warehouse and an available product for a sale.
+6. Use **Transfer** to move stock between different warehouses. Destination stock
+   is incremented, source stock is decremented, and the total stays unchanged.
+
+Missing product–warehouse stock entries mean quantity zero and reorder level zero.
+Low-stock alerts use quantity <= local reorder level, including zero defaults.
+Warehouses and products with positive stock or movement history cannot be deleted.
+Suppliers with purchase history cannot be deleted. Purchase prices belong to supplier–product associations and prefill the purchase
+form; you can override the cost for a single purchase. Historical costs remain
+unchanged when catalogue prices change. Sale prices are entered per sale.
+Removing a catalogue association
+only prevents future purchases from that supplier; historical purchases remain.
+Transfers do not generate purchases, sales or revenue. Quantities are whole units.
+
+## Verification
+Run headless tests with `python3 -m unittest discover -s tests -v`.
+Run the real-widget integration check with `python3 tests/gui_smoke.py` in a GUI
+session. It uses a temporary database and does not modify `inventory.db`.
 
 ## Requirements
 - Python 3.9+
@@ -38,19 +63,13 @@ A console-based Inventory Management System to track product stock, sales, purch
 3. The database (`inventory.db`) will be initialized on first run.
 
 ## Project Structure
-- `main.py`: Entry point; initializes the database and starts the CLI
+- `main.py`: Entry point; starts the GUI
+- `gui.py`: Main window, products and suppliers
+- `warehouse_ui.py`: Warehouses, catalogues, transactions and reports
 - `db.py`: Database helper and schema initialization
 - `dao.py`: Data Access Objects for Products, Suppliers, Purchases, Sales
 - `services.py`: Business logic and validations
 - `cli.py`: Console menus and user interaction
-
-## Common Tasks
-- Add a product: Main Menu → Manage Products → Add Product
-- Add a supplier: Main Menu → Manage Suppliers → Add Supplier
-- Record purchase: Main Menu → Record Purchase
-- Record sale: Main Menu → Record Sale
-- View stock report: Main Menu → Reports → Stock Levels
-- View low stock: Main Menu → Reports → Low Stock
 
 ## Backups
 The app stores data in `inventory.db` in this folder. Back up this file to save your data.
@@ -64,7 +83,7 @@ The app stores data in `inventory.db` in this folder. Back up this file to save 
   ```bash
   python main.py
   ```
-  Choose option 1 for GUI, or run the packaged `dist/InventoryGUI.exe` if built.
+  Launches the GUI directly, or run the packaged `dist/InventoryGUI.exe` if built.
 
 ## Upload to GitHub
 1. Create a new repository on GitHub (no README/License to avoid conflicts)

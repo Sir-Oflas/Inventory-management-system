@@ -31,7 +31,7 @@ def _save_settings(settings: dict) -> None:
 
 def _get_currency(settings: Optional[dict] = None) -> str:
     s = settings if settings is not None else _load_settings()
-    return s.get("currency", "₹")
+    return s.get("currency", "€")
 
 
 def prompt_int(message: str, allow_empty: bool = False) -> Optional[int]:
@@ -453,9 +453,9 @@ def utilities_menu() -> None:
             pause()
         elif choice == "2":
             settings = _load_settings()
-            current = settings.get("currency", "₹")
+            current = settings.get("currency", "€")
             print(f"Current currency symbol: {current}")
-            new_symbol = input("Enter new currency symbol (e.g., ₹, $, €, £): ").strip()
+            new_symbol = input("Enter new currency symbol (e.g., €, $, €, £): ").strip()
             if new_symbol:
                 settings["currency"] = new_symbol
                 _save_settings(settings)

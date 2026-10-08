@@ -2,6 +2,11 @@ name: Build Windows EXE
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, windows-portable]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -19,11 +24,17 @@ jobs:
       - name: Installa PyInstaller
         run: python -m pip install pyinstaller
 
+      - name: Verifica codice e GUI
+        run: |
+          python -m unittest discover -s tests -v
+          python tests/gui_smoke.py
+
       - name: Crea InventoryIMS.exe
-        run: python -m PyInstaller --onefile --windowed --name InventoryIMS main.py
+        run: python -m PyInstaller --clean --noconfirm --onefile --windowed --name InventoryIMS main.py
 
       - name: Prepara EXE da scaricare
         uses: actions/upload-artifact@v4
         with:
           name: InventoryIMS-Windows
           path: dist/InventoryIMS.exe
+          if-no-files-found: error
