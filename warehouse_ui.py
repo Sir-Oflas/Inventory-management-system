@@ -4,6 +4,18 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 
 
+def center_dialog_on_screen(dialog):
+    """Position a completed form before showing it to avoid a visible jump."""
+    dialog.update_idletasks()
+    width = dialog.winfo_reqwidth()
+    height = dialog.winfo_reqheight()
+    x = max(0, (dialog.winfo_screenwidth() - width) // 2)
+    y = max(0, (dialog.winfo_screenheight() - height) // 2)
+    dialog.geometry(f'{width}x{height}+{x}+{y}')
+    dialog.deiconify()
+    dialog.grab_set()
+
+
 def export_rows(parent, rows, columns, filename):
     path = filedialog.asksaveasfilename(parent=parent, initialfile=filename,
         defaultextension='.csv', filetypes=[('CSV', '*.csv')])
@@ -55,10 +67,10 @@ class ScrollPage(ttk.Frame):
 
 
 class Choice(ttk.Combobox):
-    def __init__(self, parent, on_select=None, all_label=None):
-        self.variable = tk.StringVar()
+    def __init__(self, parent, on_select=None, all_label=None, placeholder="(select an item)"):
+        self.placeholder = placeholder
+        self.variable = tk.StringVar(value=all_label or placeholder)
         self.all_label = all_label
-        self.loaded = False
         super().__init__(parent, textvariable=self.variable, state='readonly', width=32)
         if on_select:
             self.bind('<<ComboboxSelected>>', lambda event: on_select())
@@ -70,19 +82,13 @@ class Choice(ttk.Combobox):
     def reload(self, rows):
         selected = self.identifier()
         values = [f"{row['id']}: {row['name']}" for row in rows]
-        if self.all_label:
-            values.insert(0, self.all_label)
+        values.insert(0, self.all_label or self.placeholder)
         self['values'] = values
         match = next((value for value in values if ':' in value and int(value.split(':', 1)[0]) == selected), None)
         if match:
             self.set(match)
-        elif self.all_label:
-            self.set(self.all_label)
-        elif not self.loaded and values:
-            self.set(values[0])
         else:
-            self.set('')
-        self.loaded = True
+            self.set(self.all_label or self.placeholder)
 
 
 class Table(ttk.Treeview):
@@ -123,9 +129,9 @@ def saved(parent, action, refresh):
 class WarehouseDialog(tk.Toplevel):
     def __init__(self, parent, submit, initial=None):
         super().__init__(parent)
+        self.withdraw()
         self.title('Warehouse')
         self.transient(parent.winfo_toplevel())
-        self.grab_set()
         initial = initial or {}
         self.name = tk.StringVar(value=initial.get('name', ''))
         self.address = tk.StringVar(value=initial.get('address') or '')
@@ -137,6 +143,7 @@ class WarehouseDialog(tk.Toplevel):
                 self.destroy()
         ttk.Button(self, text='Save', command=save).grid(row=2, column=1, pady=10)
         ttk.Button(self, text='Cancel', command=self.destroy).grid(row=2, column=0)
+        center_dialog_on_screen(self)
 
 
 class WarehousesTab(ttk.Frame):
@@ -146,7 +153,7 @@ class WarehousesTab(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(fill='x', padx=8, pady=8)
         ttk.Label(bar, text='Warehouse: ').pack(side='left')
-        self.warehouse = Choice(bar, self.refresh_stock)
+        self.warehouse = Choice(bar, self.refresh_stock, placeholder="(select a warehouse)")
         self.warehouse.pack(side='left', padx=4)
         ttk.Button(bar, text='Refresh', command=self.refresh).pack(side='left', padx=4)
         ttk.Label(self, text='Selected warehouse: quantities and local reorder levels').pack(anchor='w', padx=8, pady=6)
@@ -204,7 +211,13 @@ class TransactionsTab(ttk.Frame):
             choices = ['supplier', 'destination', 'product'] if kind == 'purchase' else (['source', 'product'] if kind == 'sale' else ['source', 'product', 'destination'])
             for index, key in enumerate(choices):
                 ttk.Label(frame, text=key.title()).grid(row=index, column=0, padx=8, pady=6, sticky='w')
-                form[key] = Choice(frame, self.refresh_choices)
+                placeholder = {
+                    "supplier": "(select a supplier)",
+                    "product": "(select a product)",
+                    "source": "(select the source warehouse)",
+                    "destination": "(select the destination warehouse)",
+                }[key]
+                form[key] = Choice(frame, self.refresh_choices, placeholder=placeholder)
                 form[key].grid(row=index, column=1, sticky='ew', padx=8, pady=6)
             fields = ['quantity', 'unit_cost'] if kind == 'purchase' else (['quantity', 'unit_price', 'customer', 'notes'] if kind == 'sale' else ['quantity', 'notes'])
             for index, key in enumerate(fields, start=len(choices)):

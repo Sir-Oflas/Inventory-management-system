@@ -14,7 +14,7 @@ import tkinter.font as tkfont
 
 from db import Database, _get_app_dir
 from services import InventoryService
-from warehouse_ui import ScrollPage, Choice, Table, saved, export_rows, WarehouseDialog, WarehousesTab, TransactionsTab, ReportsTab
+from warehouse_ui import ScrollPage, Choice, Table, saved, export_rows, WarehouseDialog, WarehousesTab, TransactionsTab, ReportsTab, center_dialog_on_screen
 
 
 def format_currency(value: float, symbol: str) -> str:
@@ -225,7 +225,7 @@ class SuppliersTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill='x', padx=10, pady=8)
         ttk.Label(top, text='Supplier: ').pack(side=tk.LEFT)
-        self.supplier = Choice(top, self.refresh_catalogue)
+        self.supplier = Choice(top, self.refresh_catalogue, placeholder="(select a supplier)")
         self.supplier.pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text='Refresh', command=self.refresh).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text='Export CSV', command=self.export_csv).pack(side=tk.LEFT, padx=4)
@@ -233,7 +233,7 @@ class SuppliersTab(ttk.Frame):
         associations = ttk.LabelFrame(self, text='Product catalogue')
         associations.pack(fill='x', padx=10, pady=4)
         ttk.Label(associations, text='Product: ').pack(side=tk.LEFT, padx=4, pady=8)
-        self.existing_product = Choice(associations)
+        self.existing_product = Choice(associations, placeholder="(select a product)")
         self.existing_product.pack(side=tk.LEFT, padx=4, pady=8)
         ttk.Button(associations, text='Associate existing', command=self.associate).pack(side=tk.LEFT, padx=4, pady=8)
         ttk.Button(associations, text='Remove association', command=self.unlink).pack(side=tk.LEFT, padx=4, pady=8)
@@ -393,9 +393,9 @@ class SettingsTab(ttk.Frame):
 class ProductDialog(tk.Toplevel):
     def __init__(self, parent: ProductsTab, title: str, on_submit, initial: Optional[dict] = None, supplier_price: bool = False) -> None:
         super().__init__(parent)
+        self.withdraw()
         self.title(title)
         self.transient(parent)
-        self.grab_set()
         self.resizable(False, False)
         self.on_submit = on_submit
 
@@ -424,6 +424,7 @@ class ProductDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda e: self._save())
         self.bind("<Escape>", lambda e: self.destroy())
+        center_dialog_on_screen(self)
 
     def _save(self) -> None:
         data = {
@@ -447,9 +448,9 @@ class ProductDialog(tk.Toplevel):
 class SupplierDialog(tk.Toplevel):
     def __init__(self, parent: SuppliersTab, title: str, on_submit, initial: Optional[dict] = None) -> None:
         super().__init__(parent)
+        self.withdraw()
         self.title(title)
         self.transient(parent)
-        self.grab_set()
         self.resizable(False, False)
         self.on_submit = on_submit
 
@@ -479,6 +480,7 @@ class SupplierDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda e: self._save())
         self.bind("<Escape>", lambda e: self.destroy())
+        center_dialog_on_screen(self)
 
     def _save(self) -> None:
         data = {
